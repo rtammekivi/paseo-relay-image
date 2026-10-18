@@ -1,0 +1,82 @@
+name: build
+
+on:
+  schedule:
+    - cron: "37 3 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Paseo release tag (default latest)
+        required: false
+      ref:
+        description: paseo-relay commit (default main)
+        required: false
+      force:
+        description: Rebuild even if the image exists
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/paseo-relay
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve version and ref
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          version="$INPUT_VERSION"
+          if [ -z "$version" ]; then
+            version=$(gh release list -R getpaseo/paseo --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')
+          fi
+          version="${version#v}"
+          ref="$INPUT_REF"
+          if [ -z "$ref" ]; then
+            ref=$(gh api repos/getpaseo/paseo-relay/commits/main --jq .sha)
+          fi
+          test -n "$version" && test -n "$ref"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "sha=${ref:0:12}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Check existing image
+        id: exists
+        run: |
+          if docker manifest inspect "$IMAGE:${{ steps.resolve.outputs.version }}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.exists != 'true' || inputs.force
+
+      - uses: docker/build-push-action@v6
+        if: steps.exists.outputs.exists != 'true' || inputs.force
+        with:
+          context: https://github.com/getpaseo/paseo-relay.git#${{ steps.resolve.outputs.ref }}
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.resolve.outputs.version }}
+            ${{ env.IMAGE }}:sha-${{ steps.resolve.outputs.sha }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.resolve.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.resolve.outputs.ref }}
